@@ -10,7 +10,8 @@ import { workerManager } from '@/core/workerManager';
 import { downloadFiles, generateFilename } from '@/utils/file';
 import { parsePageExpr, validatePageExpr, formatPageRange } from '@/utils/range';
 import { pdfRectToCanvasRect } from '@/core/coords';
-import { setCropBox, hardCropToMediaBox } from '@/core/pdfEdit';
+import { setCropBox, hardCropToMediaBox, extractRanges } from '@/core/pdfEdit';
+import { convertPdfToSvg } from '@/services/svgConverter';
 import type { ExportOptions, ViewportInfo } from '@/core/types';
 
 interface ExportModalProps {
@@ -96,30 +97,64 @@ export default function ExportModal({ onClose }: ExportModalProps) {
         const scale = rasterFormat === 'svg' ? 1 : ((exportOptions.dpi ?? 200) / 72);
         const quality = rasterFormat === 'jpeg' ? exportOptions.quality ?? 85 : undefined;
         
-        const tasks = pages0Based.map(pageIndex => ({
-          id: `export_${pageIndex}`,
-          type: 'export' as const,
-          page: pageIndex,
-          scale,
-          format: rasterFormat,
-          quality,
-        }));
+        if (rasterFormat === 'svg') {
+          if (pages0Based.length === 0) {
+            setProgress(100);
+            return;
+          }
 
-        const results = await workerManager.exportPages(arrayBuffer, tasks);
-        
-        const files = await Promise.all(results.map(async (result, index) => {
-          const pageNum = pages1Based[index];
-          const extension = rasterFormat === 'svg' ? 'svg' : rasterFormat;
-          const filename = `page-${pageNum.toString().padStart(4, '0')}.${extension}`;
-          const pageMeta = pages[pages0Based[index]];
+          const converterEndpoint = (import.meta as any).env?.VITE_SVG_CONVERTER_URL ?? 'http://localhost:4000/convert/svg';
+          const files = [] as Array<{ data: string; filename: string; mimeType: string }>;
+
+          for (let index = 0; index < pages0Based.length; index++) {
+            const pageIndex = pages0Based[index];
+            const pageNum = pages1Based[index];
+            const filename = `page-${pageNum.toString().padStart(4, '0')}.svg`;
+
+            setProgress((index / pages0Based.length) * 100);
+
+            let singlePagePdf: Uint8Array = await extractRanges(arrayBuffer, [[pageIndex + 1, pageIndex + 1]]);
+
+            if (cropDraft && cropDraft.page === pageIndex) {
+              const cropPages = [1];
+              const pageBuffer = toArrayBuffer(singlePagePdf);
+              singlePagePdf = exportOptions.hardCrop
+                ? await hardCropToMediaBox(pageBuffer, cropPages, cropDraft.rect)
+                : await setCropBox(pageBuffer, cropPages, cropDraft.rect);
+            }
+
+            const svgString = await convertPdfToSvg(singlePagePdf, {
+              endpoint: converterEndpoint,
+              page: 1,
+            });
+
+            files.push({
+              data: svgString,
+              filename,
+              mimeType: 'image/svg+xml',
+            });
+          }
+
+          downloadFiles(files);
+          setProgress(100);
+        } else {
+          const tasks = pages0Based.map(pageIndex => ({
+            id: `export_${pageIndex}`,
+            type: 'export' as const,
+            page: pageIndex,
+            scale,
+            format: rasterFormat,
+            quality,
+          }));
+
+          const results = await workerManager.exportPages(arrayBuffer, tasks);
           
-          let data: ArrayBuffer | string;
-          let mimeType: string;
-
-          if (rasterFormat === 'svg') {
-            data = result as string;
-            mimeType = 'image/svg+xml';
-          } else {
+          const files = await Promise.all(results.map(async (result, index) => {
+            const pageNum = pages1Based[index];
+            const extension = rasterFormat;
+            const filename = `page-${pageNum.toString().padStart(4, '0')}.${extension}`;
+            const pageMeta = pages[pages0Based[index]];
+            
             // 将ImageBitmap转换为Blob
             const bitmap = result as ImageBitmap;
             const shouldCrop = exportOptions.hardCrop && cropDraft && cropDraft.page === pages0Based[index];
@@ -183,15 +218,15 @@ export default function ExportModal({ onClose }: ExportModalProps) {
               quality: rasterFormat === 'jpeg' && quality !== undefined ? quality / 100 : undefined
             });
 
-            data = await blob.arrayBuffer();
-            mimeType = `image/${rasterFormat}`;
-          }
+            const data = await blob.arrayBuffer();
+            const mimeType = `image/${rasterFormat}`;
 
-          return { data, filename, mimeType };
-        }));
+            return { data, filename, mimeType };
+          }));
 
-        downloadFiles(files);
-        setProgress(100);
+          downloadFiles(files);
+          setProgress(100);
+        }
       }
 
       // 延迟关闭模态框
