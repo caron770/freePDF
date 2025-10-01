@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import {
   useArrayBuffer,
-  usePages,
+  usePageOrder,
   useFileName
 } from '@/store/useProjectStore';
 import { downloadFile, generateFilename } from '@/utils/file';
@@ -14,7 +14,7 @@ interface SplitModalProps {
 
 export default function SplitModal({ onClose }: SplitModalProps) {
   const arrayBuffer = useArrayBuffer();
-  const pages = usePages();
+  const pageOrder = usePageOrder();
   const fileName = useFileName();
 
   const [splitMode, setSplitMode] = useState<'range' | 'each' | 'preset'>('range');
@@ -25,14 +25,14 @@ export default function SplitModal({ onClose }: SplitModalProps) {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  // 验证页面范围
+  // 验证页面范围（使用pageOrder.length因为这是实际的页面数量）
   const rangeValidation = splitMode === 'range' 
-    ? validatePageExpr(pageRange, pages.length)
+    ? validatePageExpr(pageRange, pageOrder.length)
     : { valid: true };
 
   // 验证预设范围
   const presetValidation = splitMode === 'preset'
-    ? presetRanges.every(range => validatePageExpr(range, pages.length).valid)
+    ? presetRanges.every(range => validatePageExpr(range, pageOrder.length).valid)
     : true;
 
   const handleSplit = useCallback(async () => {
@@ -43,26 +43,34 @@ export default function SplitModal({ onClose }: SplitModalProps) {
       setProgress(0);
       setError(null);
 
+      // 首先根据当前pageOrder重新组织PDF（应用删除和排序操作）
+      const reorderedPdfDataUint8 = await extractRanges(
+        arrayBuffer,
+        pageOrder.map(idx => [idx + 1, idx + 1]) // 转为1基范围
+      );
+      // 转换为ArrayBuffer
+      const reorderedPdfData = reorderedPdfDataUint8.slice().buffer;
+
       let ranges: Array<[number, number]> = [];
 
       if (splitMode === 'range') {
-        // 单一范围拆分
-        const pages1Based = parsePageExpr(pageRange, pages.length);
+        // 单一范围拆分（基于重新排序后的页面）
+        const pages1Based = parsePageExpr(pageRange, pageOrder.length);
         if (pages1Based.length > 0) {
           ranges = [[pages1Based[0], pages1Based[pages1Based.length - 1]]];
         }
       } else if (splitMode === 'each') {
-        // 按指定页数拆分
-        for (let i = 0; i < pages.length; i += splitSize) {
+        // 按指定页数拆分（基于重新排序后的页面）
+        for (let i = 0; i < pageOrder.length; i += splitSize) {
           const start = i + 1; // 转为1基
-          const end = Math.min(i + splitSize, pages.length);
+          const end = Math.min(i + splitSize, pageOrder.length);
           ranges.push([start, end]);
         }
       } else if (splitMode === 'preset') {
-        // 预设范围拆分
+        // 预设范围拆分（基于重新排序后的页面）
         const presetComputed: Array<[number, number]> = [];
         presetRanges.forEach(range => {
-          const pages1Based = parsePageExpr(range, pages.length);
+          const pages1Based = parsePageExpr(range, pageOrder.length);
           if (pages1Based.length < 1) return;
           const start = pages1Based[0];
           const end = pages1Based[pages1Based.length - 1];
@@ -71,13 +79,13 @@ export default function SplitModal({ onClose }: SplitModalProps) {
         ranges = presetComputed;
       }
 
-      // 执行拆分
+      // 执行拆分（从重新排序后的PDF中提取）
       const results = [];
       for (let i = 0; i < ranges.length; i++) {
         const [start, end] = ranges[i];
         setProgress((i / ranges.length) * 100);
 
-        const splitData = await extractRanges(arrayBuffer, [[start, end]]);
+        const splitData = await extractRanges(reorderedPdfData, [[start, end]]);
         
         const baseName = fileName.replace(/\.pdf$/i, '');
         const filename = generateFilename(
@@ -112,7 +120,7 @@ export default function SplitModal({ onClose }: SplitModalProps) {
     } finally {
       setIsSplitting(false);
     }
-  }, [arrayBuffer, splitMode, pageRange, splitSize, presetRanges, pages.length, fileName, rangeValidation.valid, presetValidation, onClose]);
+  }, [arrayBuffer, splitMode, pageRange, splitSize, presetRanges, pageOrder, fileName, rangeValidation.valid, presetValidation, onClose]);
 
   const addPresetRange = useCallback(() => {
     setPresetRanges(prev => [...prev, '']);
@@ -215,15 +223,15 @@ export default function SplitModal({ onClose }: SplitModalProps) {
               <input
                 type="number"
                 min="1"
-                max={pages.length}
+                max={pageOrder.length}
                 className="input w-full"
                 value={splitSize}
                 onChange={(e) => setSplitSize(Number(e.target.value))}
                 disabled={isSplitting}
               />
               <p className="text-xs text-gray-500 mt-1">
-                将PDF按指定页数平均拆分，共 {pages.length} 页，
-                将拆分为 {Math.ceil(pages.length / splitSize)} 个文件
+                将PDF按指定页数平均拆分，共 {pageOrder.length} 页，
+                将拆分为 {Math.ceil(pageOrder.length / splitSize)} 个文件
               </p>
             </div>
           )}
@@ -309,7 +317,7 @@ export default function SplitModal({ onClose }: SplitModalProps) {
                   <>将提取页面范围 {pageRange}</>
                 )}
                 {splitMode === 'each' && (
-                  <>将拆分为 {Math.ceil(pages.length / splitSize)} 个文件，每个 {splitSize} 页</>
+                  <>将拆分为 {Math.ceil(pageOrder.length / splitSize)} 个文件，每个 {splitSize} 页</>
                 )}
                 {splitMode === 'preset' && presetValidation && (
                   <>将拆分为 {presetRanges.filter(r => r.trim()).length} 个文件</>
