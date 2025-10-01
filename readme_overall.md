@@ -24,7 +24,7 @@
 2. 页面管理：删除、重排、拆分导出（按页范围）。
 3. 手动裁剪：在画布框选区域，设置页面  **CropBox** （非破坏裁剪）；提供“硬裁剪”开关（将裁后区域写入 MediaBox）。
 4. 导出为图片：指定 DPI 的 PNG/JPEG（单页或批量）。
-5. 导出为 SVG（基础）：用 PDF.js SVG 模式；若失败提示用户改用“高保真导出（WASM，可后续接入）”。
+5. 导出为 SVG：默认走浏览器端（PDF.js SVG back-end），若遇到兼容性问题可切换到 **Inkscape CLI 后端服务**，保持高保真矢量输出。
 6. 纯前端运行：支持离线（PWA 可选，若时间不足可不启用）。
 7. 大文件与高 DPI 渲染在 **Web Worker** 中执行，避免卡 UI。
 
@@ -47,6 +47,9 @@
 * **状态管理** ：轻量（React Context + Hooks 即可）
 * **样式** ：Tailwind（可选）或简化的 CSS Modules
 * **打包** ：Vite + vite-plugin-worker（或原生 `new Worker(new URL(..., import.meta.url))`）
+
+> **可选后端：Inkscape CLI SVG 转换服务**  
+> 当浏览器端的 PDF.js SVG 导出不稳定时，可在 `server/` 子项目内运行一个 Node.js + Inkscape 的后端，将单页 PDF 转换为高保真 SVG。前端通过 `VITE_SVG_CONVERTER_URL` 指定服务地址即可启用。
 
 ---
 
@@ -477,3 +480,18 @@ npm run preview
 
 * 本 README 提供了**指令级**实现细节与代码骨架，便于另一个 AI/开发者据此自动生成完整代码。
 * 若你需要，我可以把 **PDF.js Worker 端的具体实现** 和 **Canvas 橡皮筋框选组件** 也补全成可运行版本。
+
+### Inkscape CLI 后端（可选）
+
+1. 安装 Inkscape，确保 `inkscape --version` 命令可用。
+2. 在项目根目录运行：
+   ```bash
+   cd server
+   npm install
+   npm start
+   ```
+   默认监听 `http://localhost:4000/convert/svg`，可通过 `PORT` 环境变量调整端口。
+3. 前端设置环境变量 `VITE_SVG_CONVERTER_URL` 指向上述接口；未设置时默认使用 `http://localhost:4000/convert/svg`。
+4. 导出 SVG 时，前端会将单页/裁剪后的 PDF 上传到该接口，再下载 Inkscape 生成的高保真矢量文件。
+
+> 若服务器上部署，请把 Inkscape 安装进镜像或宿主机，并开放相应的 HTTP 接口。建议为服务增加鉴权与并发限制。

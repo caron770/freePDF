@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   useProjectStore,
   useCurrentPage,
   usePages,
+  usePageOrder,
   useRenderScale,
   useArrayBuffer,
   useCropDraft
@@ -20,9 +21,16 @@ export default function CanvasViewer() {
 
   const currentPage = useCurrentPage();
   const pages = usePages();
+  const pageOrder = usePageOrder();
   const renderScale = useRenderScale();
   const arrayBuffer = useArrayBuffer();
   const cropDraft = useCropDraft();
+
+  // 计算当前页面在显示顺序中的位置
+  const currentDisplayPosition = useMemo(() => {
+    if (currentPage === null) return -1;
+    return pageOrder.indexOf(currentPage);
+  }, [currentPage, pageOrder]);
 
   const [renderedImage, setRenderedImage] = useState<ImageBitmap | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -224,8 +232,13 @@ export default function CanvasViewer() {
       {/* 工具栏 */}
       <div className="absolute top-4 left-4 z-10 bg-white rounded-lg shadow-lg p-2 flex items-center gap-2">
         <button
-          onClick={() => setCurrentPage(Math.max(0, currentPage - 1))}
-          disabled={currentPage === 0}
+          onClick={() => {
+            if (currentDisplayPosition > 0) {
+              // 切换到前一个位置的页面
+              setCurrentPage(pageOrder[currentDisplayPosition - 1]);
+            }
+          }}
+          disabled={currentDisplayPosition <= 0}
           className="btn btn-ghost btn-sm"
           title="上一页"
         >
@@ -235,12 +248,17 @@ export default function CanvasViewer() {
         </button>
 
         <span className="text-sm text-gray-600 px-2">
-          {currentPage + 1} / {pages.length}
+          {currentDisplayPosition >= 0 ? currentDisplayPosition + 1 : 0} / {pageOrder.length}
         </span>
 
         <button
-          onClick={() => setCurrentPage(Math.min(pages.length - 1, currentPage + 1))}
-          disabled={currentPage === pages.length - 1}
+          onClick={() => {
+            if (currentDisplayPosition >= 0 && currentDisplayPosition < pageOrder.length - 1) {
+              // 切换到下一个位置的页面
+              setCurrentPage(pageOrder[currentDisplayPosition + 1]);
+            }
+          }}
+          disabled={currentDisplayPosition < 0 || currentDisplayPosition >= pageOrder.length - 1}
           className="btn btn-ghost btn-sm"
           title="下一页"
         >

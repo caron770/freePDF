@@ -145,7 +145,7 @@ function ThumbnailItem({ pageIndex, position, onMove }: ThumbnailItemProps) {
     >
       {/* 页面号 */}
       <div className="text-xs text-gray-500 mb-1 text-center font-medium">
-        第 {pageIndex + 1} 页
+        第 {position + 1} 页
       </div>
 
       {/* 缩略图容器 */}

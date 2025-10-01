@@ -10,7 +10,8 @@ import { workerManager } from '@/core/workerManager';
 import { downloadFiles, generateFilename } from '@/utils/file';
 import { parsePageExpr, validatePageExpr, formatPageRange } from '@/utils/range';
 import { pdfRectToCanvasRect } from '@/core/coords';
-import { setCropBox, hardCropToMediaBox } from '@/core/pdfEdit';
+import { setCropBox, hardCropToMediaBox, extractRanges } from '@/core/pdfEdit';
+import { convertPdfToSvg } from '@/services/svgConverter';
 import type { ExportOptions, ViewportInfo } from '@/core/types';
 
 interface ExportModalProps {
@@ -40,16 +41,27 @@ export default function ExportModal({ onClose }: ExportModalProps) {
   });
 
   const [pageRange, setPageRange] = useState(() => {
-    const selectedPages = selection.size > 0 ? Array.from(selection).sort((a, b) => a - b) : pageOrder;
-    return formatPageRange(selectedPages.map(i => i + 1)); // 转为1基
+    // 如果有选择，需要将原始页面索引映射到显示位置
+    if (selection.size > 0) {
+      const selectedOriginalIndices = Array.from(selection);
+      // 找到这些原始索引在当前显示顺序中的位置
+      const displayPositions = selectedOriginalIndices
+        .map(originalIdx => pageOrder.indexOf(originalIdx))
+        .filter(pos => pos >= 0)
+        .sort((a, b) => a - b);
+      return formatPageRange(displayPositions.map(i => i + 1)); // 转为1基
+    } else {
+      // 没有选择时，默认是所有页面（按当前显示顺序）
+      return formatPageRange(pageOrder.map((_, i) => i + 1));
+    }
   });
 
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  // 验证页面范围
-  const rangeValidation = validatePageExpr(pageRange, pages.length);
+  // 验证页面范围（基于当前显示的页面数量）
+  const rangeValidation = validatePageExpr(pageRange, pageOrder.length);
 
   const handleExport = useCallback(async () => {
     if (!arrayBuffer || !rangeValidation.valid) return;
@@ -59,25 +71,38 @@ export default function ExportModal({ onClose }: ExportModalProps) {
       setProgress(0);
       setError(null);
 
-      // 解析页面范围
-      const pages1Based = parsePageExpr(pageRange, pages.length);
-      const pages0Based = pages1Based.map(p => p - 1);
+      // 解析页面范围（基于当前显示顺序）
+      const displayPages1Based = parsePageExpr(pageRange, pageOrder.length);
+      const displayPages0Based = displayPages1Based.map(p => p - 1);
+      
+      // 映射到原始页面索引（pageOrder存储的是原始页面索引）
+      const originalPages0Based = displayPages0Based.map(displayIdx => pageOrder[displayIdx]);
+      
       const format = exportOptions.format;
 
       if (format === 'pdf') {
         // 导出PDF
         let pdfData: ArrayBuffer | Uint8Array = arrayBuffer;
 
+        // 从原始PDF中按照重新排序后的顺序提取页面
+        const inputBuffer = toArrayBuffer(pdfData);
+        pdfData = await extractRanges(
+          inputBuffer,
+          originalPages0Based.map(idx => [idx + 1, idx + 1]) // 将原始页面索引转为1基的范围
+        );
+
         // 如果有裁剪设置，应用裁剪
         if (cropDraft) {
-          const cropPages1 = pages1Based.filter(p => p - 1 === cropDraft.page);
-          if (cropPages1.length > 0) {
-            const inputBuffer = toArrayBuffer(pdfData);
+          // 需要找到cropDraft.page（原始页面索引）在导出的页面中的新位置
+          const newPageIndex = originalPages0Based.indexOf(cropDraft.page);
+          if (newPageIndex >= 0) {
+            const cropPages1 = [newPageIndex + 1]; // 在新PDF中的位置（1基）
+            const cropBuffer = toArrayBuffer(pdfData);
 
             if (exportOptions.hardCrop) {
-              pdfData = await hardCropToMediaBox(inputBuffer, cropPages1, cropDraft.rect);
+              pdfData = await hardCropToMediaBox(cropBuffer, cropPages1, cropDraft.rect);
             } else {
-              pdfData = await setCropBox(inputBuffer, cropPages1, cropDraft.rect);
+              pdfData = await setCropBox(cropBuffer, cropPages1, cropDraft.rect);
             }
           }
         }
@@ -96,33 +121,68 @@ export default function ExportModal({ onClose }: ExportModalProps) {
         const scale = rasterFormat === 'svg' ? 1 : ((exportOptions.dpi ?? 200) / 72);
         const quality = rasterFormat === 'jpeg' ? exportOptions.quality ?? 85 : undefined;
         
-        const tasks = pages0Based.map(pageIndex => ({
-          id: `export_${pageIndex}`,
-          type: 'export' as const,
-          page: pageIndex,
-          scale,
-          format: rasterFormat,
-          quality,
-        }));
+        if (rasterFormat === 'svg') {
+          if (originalPages0Based.length === 0) {
+            setProgress(100);
+            return;
+          }
 
-        const results = await workerManager.exportPages(arrayBuffer, tasks);
-        
-        const files = await Promise.all(results.map(async (result, index) => {
-          const pageNum = pages1Based[index];
-          const extension = rasterFormat === 'svg' ? 'svg' : rasterFormat;
-          const filename = `page-${pageNum.toString().padStart(4, '0')}.${extension}`;
-          const pageMeta = pages[pages0Based[index]];
+          const converterEndpoint = (import.meta as any).env?.VITE_SVG_CONVERTER_URL ?? 'http://localhost:4000/convert/svg';
+          const files = [] as Array<{ data: string; filename: string; mimeType: string }>;
+
+          for (let index = 0; index < originalPages0Based.length; index++) {
+            const originalPageIndex = originalPages0Based[index];
+            const displayPageNum = displayPages1Based[index];
+            const filename = `page-${displayPageNum.toString().padStart(4, '0')}.svg`;
+
+            setProgress((index / originalPages0Based.length) * 100);
+
+            let singlePagePdf: Uint8Array = await extractRanges(arrayBuffer, [[originalPageIndex + 1, originalPageIndex + 1]]);
+
+            if (cropDraft && cropDraft.page === originalPageIndex) {
+              const cropPages = [1];
+              const pageBuffer = toArrayBuffer(singlePagePdf);
+              singlePagePdf = exportOptions.hardCrop
+                ? await hardCropToMediaBox(pageBuffer, cropPages, cropDraft.rect)
+                : await setCropBox(pageBuffer, cropPages, cropDraft.rect);
+            }
+
+            const svgString = await convertPdfToSvg(singlePagePdf, {
+              endpoint: converterEndpoint,
+              page: 1,
+            });
+
+            files.push({
+              data: svgString,
+              filename,
+              mimeType: 'image/svg+xml',
+            });
+          }
+
+          downloadFiles(files);
+          setProgress(100);
+        } else {
+          const tasks = originalPages0Based.map(originalPageIndex => ({
+            id: `export_${originalPageIndex}`,
+            type: 'export' as const,
+            page: originalPageIndex,
+            scale,
+            format: rasterFormat,
+            quality,
+          }));
+
+          const results = await workerManager.exportPages(arrayBuffer, tasks);
           
-          let data: ArrayBuffer | string;
-          let mimeType: string;
-
-          if (rasterFormat === 'svg') {
-            data = result as string;
-            mimeType = 'image/svg+xml';
-          } else {
+          const files = await Promise.all(results.map(async (result, index) => {
+            const displayPageNum = displayPages1Based[index];
+            const extension = rasterFormat;
+            const filename = `page-${displayPageNum.toString().padStart(4, '0')}.${extension}`;
+            const originalPageIndex = originalPages0Based[index];
+            const pageMeta = pages[originalPageIndex];
+            
             // 将ImageBitmap转换为Blob
             const bitmap = result as ImageBitmap;
-            const shouldCrop = exportOptions.hardCrop && cropDraft && cropDraft.page === pages0Based[index];
+            const shouldCrop = exportOptions.hardCrop && cropDraft && cropDraft.page === originalPageIndex;
 
             let sourceX = 0;
             let sourceY = 0;
@@ -183,15 +243,15 @@ export default function ExportModal({ onClose }: ExportModalProps) {
               quality: rasterFormat === 'jpeg' && quality !== undefined ? quality / 100 : undefined
             });
 
-            data = await blob.arrayBuffer();
-            mimeType = `image/${rasterFormat}`;
-          }
+            const data = await blob.arrayBuffer();
+            const mimeType = `image/${rasterFormat}`;
 
-          return { data, filename, mimeType };
-        }));
+            return { data, filename, mimeType };
+          }));
 
-        downloadFiles(files);
-        setProgress(100);
+          downloadFiles(files);
+          setProgress(100);
+        }
       }
 
       // 延迟关闭模态框
@@ -205,7 +265,7 @@ export default function ExportModal({ onClose }: ExportModalProps) {
     } finally {
       setIsExporting(false);
     }
-  }, [arrayBuffer, pageRange, exportOptions, pages, cropDraft, rangeValidation.valid, onClose]);
+  }, [arrayBuffer, pageRange, exportOptions, pages, pageOrder, cropDraft, rangeValidation.valid, onClose]);
 
   return (
     <div className="modal-overlay">
